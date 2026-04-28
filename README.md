@@ -13,6 +13,8 @@ The first provider is the local Codex CLI via `codex exec --json`.
 - Codex CLI provider with resume-aware arg construction
 - Codex JSONL event parser for messages, completion, usage, commands, file changes, approvals, and questions
 - Streaming SSE for Chat Completions and Responses
+- Droid-compatible Responses client tool bridge for mission tools such as `StartMissionRun` and `EndFeatureRun`
+- Droid mission prompts that teach Codex the `ProposeMission` -> artifact creation -> `StartMissionRun` -> `EndFeatureRun` flow
 - Bearer token or `x-api-key` auth when `CAGENT_TOKEN` is set
 - Per-request start/completion logs with status, response bytes, and duration
 - Prometheus-style HTTP counters and duration totals at `GET /metrics`
@@ -86,7 +88,7 @@ If requests omit reasoning, set a server-wide default with `CAGENT_DEFAULT_REASO
 
 cagent forwards this to Codex as `-c model_reasoning_effort="..."`.
 
-For Factory Droid BYOK, set both Droid's hidden `maxContextLimit` custom-model field and `compactionTokenLimitPerModel`. Droid's `/context` command displays the compaction limit, and the default is 250000 unless overridden in `~/.factory/settings.json`. See [docs/droid-settings/README.md](/Users/davidroman/Documents/code/github/cagent/docs/droid-settings/README.md).
+For Factory Droid BYOK, set both Droid's hidden `maxContextLimit` custom-model field and `compactionTokenLimitPerModel`. Droid's `/context` command displays the compaction limit, and the default is 250000 unless overridden in `~/.factory/settings.json`. Use the `openai` provider for mission mode; Droid sends mission actions as Responses tools with names like `ProposeMission`, `StartMissionRun`, `DismissHandoffItems`, and `EndFeatureRun`. See [docs/droid-settings/README.md](/Users/davidroman/Documents/code/github/cagent/docs/droid-settings/README.md).
 
 Model ids can carry provider and reasoning hints:
 

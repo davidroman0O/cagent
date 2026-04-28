@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/cagent/internal/agent"
+	"github.com/davidroman0O/cagent/internal/compat"
 )
 
 func writeEventStream(w http.ResponseWriter, events <-chan agent.AgentEvent) {
@@ -74,7 +75,7 @@ func writeResponsesSSE(w http.ResponseWriter, id, model string, events <-chan ag
 	created := time.Now().Unix()
 	writeSSE(w, "response.created", map[string]any{
 		"type":     "response.created",
-		"response": map[string]any{"id": id, "object": "response", "created_at": created, "model": model, "status": "in_progress"},
+		"response": map[string]any{"id": id, "object": "response", "created_at": created, "model": model, "status": "in_progress", "output": []any{}},
 	})
 	writeSSE(w, "response.in_progress", map[string]any{
 		"type":     "response.in_progress",
@@ -118,11 +119,109 @@ func writeResponsesSSE(w http.ResponseWriter, id, model string, events <-chan ag
 	if itemStarted {
 		writeSSE(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": "msg_" + id, "output_index": 0, "content_index": 0, "text": last})
 		writeSSE(w, "response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": "msg_" + id, "output_index": 0, "content_index": 0})
-		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "item": map[string]any{"id": "msg_" + id, "type": "message", "role": "assistant"}})
+		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0, "item": responsesMessageItem(id, last, "completed")})
 	}
 	writeSSE(w, "response.completed", map[string]any{
 		"type":     "response.completed",
-		"response": map[string]any{"id": id, "status": "completed", "output_text": last},
+		"response": responsesCompletedObject(id, model, last, itemStarted),
+	})
+	writeRawSSE(w, "", "[DONE]")
+	flush(flusher)
+}
+
+func writeResponsesCollectedTextSSE(w http.ResponseWriter, id, model, text string) {
+	startSSE(w)
+	flusher, _ := w.(http.Flusher)
+	created := time.Now().Unix()
+	writeSSE(w, "response.created", map[string]any{
+		"type":     "response.created",
+		"response": map[string]any{"id": id, "object": "response", "created_at": created, "model": model, "status": "in_progress", "output": []any{}},
+	})
+	writeSSE(w, "response.in_progress", map[string]any{
+		"type":     "response.in_progress",
+		"response": map[string]any{"id": id, "status": "in_progress"},
+	})
+	itemStarted := false
+	if text != "" {
+		ensureResponseItem(w, id, &itemStarted)
+		writeResponsesDelta(w, id, text)
+		writeSSE(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": "msg_" + id, "output_index": 0, "content_index": 0, "text": text})
+		writeSSE(w, "response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": "msg_" + id, "output_index": 0, "content_index": 0})
+		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0, "item": responsesMessageItem(id, text, "completed")})
+	}
+	writeSSE(w, "response.completed", map[string]any{
+		"type":     "response.completed",
+		"response": responsesCompletedObject(id, model, text, itemStarted),
+	})
+	writeRawSSE(w, "", "[DONE]")
+	flush(flusher)
+}
+
+func writeResponsesFunctionCallSSE(w http.ResponseWriter, id, model string, call compat.ResponsesToolCall) {
+	startSSE(w)
+	flusher, _ := w.(http.Flusher)
+	created := time.Now().Unix()
+	itemID := "fc_" + id
+	callID := "call_" + id
+	args := call.ArgumentsString()
+	itemStarted := map[string]any{
+		"id":        itemID,
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      call.Name,
+		"arguments": "",
+		"status":    "in_progress",
+	}
+	itemDone := map[string]any{
+		"id":        itemID,
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      call.Name,
+		"arguments": args,
+		"status":    "completed",
+	}
+
+	writeSSE(w, "response.created", map[string]any{
+		"type":     "response.created",
+		"response": map[string]any{"id": id, "object": "response", "created_at": created, "model": model, "status": "in_progress", "output": []any{}},
+	})
+	writeSSE(w, "response.in_progress", map[string]any{
+		"type":     "response.in_progress",
+		"response": map[string]any{"id": id, "status": "in_progress"},
+	})
+	writeSSE(w, "response.output_item.added", map[string]any{
+		"type":         "response.output_item.added",
+		"output_index": 0,
+		"item":         itemStarted,
+	})
+	writeSSE(w, "response.function_call_arguments.delta", map[string]any{
+		"type":         "response.function_call_arguments.delta",
+		"item_id":      itemID,
+		"output_index": 0,
+		"delta":        args,
+	})
+	writeSSE(w, "response.function_call_arguments.done", map[string]any{
+		"type":         "response.function_call_arguments.done",
+		"item_id":      itemID,
+		"output_index": 0,
+		"arguments":    args,
+	})
+	writeSSE(w, "response.output_item.done", map[string]any{
+		"type":         "response.output_item.done",
+		"output_index": 0,
+		"item":         itemDone,
+	})
+	writeSSE(w, "response.completed", map[string]any{
+		"type": "response.completed",
+		"response": map[string]any{
+			"id":          id,
+			"object":      "response",
+			"created_at":  created,
+			"model":       model,
+			"status":      "completed",
+			"output":      []any{itemDone},
+			"output_text": "",
+		},
 	})
 	writeRawSSE(w, "", "[DONE]")
 	flush(flusher)
@@ -176,6 +275,35 @@ func writeResponsesDelta(w http.ResponseWriter, id, delta string) {
 		"content_index": 0,
 		"delta":         delta,
 	})
+}
+
+func responsesMessageItem(id, text, status string) map[string]any {
+	return map[string]any{
+		"id":     "msg_" + id,
+		"type":   "message",
+		"role":   "assistant",
+		"status": status,
+		"content": []any{map[string]any{
+			"type": "output_text",
+			"text": text,
+		}},
+	}
+}
+
+func responsesCompletedObject(id, model, text string, itemStarted bool) map[string]any {
+	output := []any{}
+	if itemStarted {
+		output = append(output, responsesMessageItem(id, text, "completed"))
+	}
+	return map[string]any{
+		"id":          id,
+		"object":      "response",
+		"created_at":  time.Now().Unix(),
+		"model":       model,
+		"status":      "completed",
+		"output":      output,
+		"output_text": text,
+	}
 }
 
 func startSSE(w http.ResponseWriter) {

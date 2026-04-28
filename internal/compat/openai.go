@@ -45,6 +45,8 @@ type ResponsesRequest struct {
 	Input                      json.RawMessage `json:"input"`
 	Instructions               string          `json:"instructions,omitempty"`
 	Stream                     bool            `json:"stream"`
+	Tools                      json.RawMessage `json:"tools,omitempty"`
+	ToolChoice                 json.RawMessage `json:"tool_choice,omitempty"`
 	SessionID                  string          `json:"session_id,omitempty"`
 	ConversationID             string          `json:"conversation_id,omitempty"`
 	ThreadID                   string          `json:"thread_id,omitempty"`
@@ -104,10 +106,14 @@ type ResponsesObject struct {
 }
 
 type ResponsesOutput struct {
-	ID      string                 `json:"id"`
-	Type    string                 `json:"type"`
-	Role    string                 `json:"role,omitempty"`
-	Content []ResponsesContentPart `json:"content,omitempty"`
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"`
+	Role      string                 `json:"role,omitempty"`
+	Content   []ResponsesContentPart `json:"content,omitempty"`
+	CallID    string                 `json:"call_id,omitempty"`
+	Name      string                 `json:"name,omitempty"`
+	Arguments string                 `json:"arguments,omitempty"`
+	Status    string                 `json:"status,omitempty"`
 }
 
 type ResponsesContentPart struct {
@@ -201,6 +207,27 @@ func NewResponsesObject(id, model, text string, usage *agent.Usage) ResponsesObj
 				Type: "output_text",
 				Text: text,
 			}},
+		}},
+	}
+}
+
+func NewResponsesFunctionCallObject(id, model string, call ResponsesToolCall, usage *agent.Usage) ResponsesObject {
+	itemID := "fc_" + id
+	callID := "call_" + id
+	return ResponsesObject{
+		ID:        id,
+		Object:    "response",
+		CreatedAt: time.Now().Unix(),
+		Status:    "completed",
+		Model:     model,
+		Usage:     usage,
+		Output: []ResponsesOutput{{
+			ID:        itemID,
+			Type:      "function_call",
+			CallID:    callID,
+			Name:      call.Name,
+			Arguments: call.ArgumentsString(),
+			Status:    "completed",
 		}},
 	}
 }
@@ -360,6 +387,12 @@ func responsesPrompt(req ResponsesRequest) string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(input)
+	}
+	if bridge := responsesToolBridgePrompt(req); bridge != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(bridge)
 	}
 	return b.String()
 }

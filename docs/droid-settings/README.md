@@ -48,13 +48,14 @@ Add this to `~/.factory/settings.json`:
   "compactionTokenLimitPerModel": {
     "gpt-5.5": 900000,
     "codex-default": 900000,
+    "codex:gpt-5.5:medium": 900000,
     "codex:gpt-5.5:high": 900000,
     "codex:gpt-5.5:xhigh": 900000
   },
   "customModels": [
     {
-      "model": "gpt-5.5",
-      "displayName": "cagent GPT-5.5 64K Safe",
+      "model": "codex:gpt-5.5:medium",
+      "displayName": "cagent GPT-5.5 Medium 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
       "apiKey": "local-cagent-token",
       "provider": "openai",
@@ -62,8 +63,8 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 64000
     },
     {
-      "model": "gpt-5.5",
-      "displayName": "cagent GPT-5.5 128K Max",
+      "model": "codex:gpt-5.5:medium",
+      "displayName": "cagent GPT-5.5 Medium 128K Max",
       "baseUrl": "http://localhost:8080/v1",
       "apiKey": "local-cagent-token",
       "provider": "openai",
@@ -71,17 +72,26 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 128000
     },
     {
-      "model": "codex-default",
-      "displayName": "cagent Codex Default Chat",
+      "model": "codex:gpt-5.5:high",
+      "displayName": "cagent GPT-5.5 High 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
       "apiKey": "local-cagent-token",
-      "provider": "generic-chat-completion-api",
+      "provider": "openai",
       "maxContextLimit": 1000000,
       "maxOutputTokens": 64000
     },
     {
       "model": "codex:gpt-5.5:high",
-      "displayName": "cagent GPT-5.5 High 64K",
+      "displayName": "cagent GPT-5.5 High 128K Max",
+      "baseUrl": "http://localhost:8080/v1",
+      "apiKey": "local-cagent-token",
+      "provider": "openai",
+      "maxContextLimit": 1000000,
+      "maxOutputTokens": 128000
+    },
+    {
+      "model": "codex:gpt-5.5:xhigh",
+      "displayName": "cagent GPT-5.5 XHigh 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
       "apiKey": "local-cagent-token",
       "provider": "openai",
@@ -90,10 +100,19 @@ Add this to `~/.factory/settings.json`:
     },
     {
       "model": "codex:gpt-5.5:xhigh",
-      "displayName": "cagent GPT-5.5 XHigh 64K",
+      "displayName": "cagent GPT-5.5 XHigh 128K Max",
       "baseUrl": "http://localhost:8080/v1",
       "apiKey": "local-cagent-token",
       "provider": "openai",
+      "maxContextLimit": 1000000,
+      "maxOutputTokens": 128000
+    },
+    {
+      "model": "codex-default",
+      "displayName": "cagent Codex Default Chat 64K Safe",
+      "baseUrl": "http://localhost:8080/v1",
+      "apiKey": "local-cagent-token",
+      "provider": "generic-chat-completion-api",
       "maxContextLimit": 1000000,
       "maxOutputTokens": 64000
     }
@@ -101,9 +120,53 @@ Add this to `~/.factory/settings.json`:
 }
 ```
 
+Naming convention:
+
+- `Medium`, `High`, and `XHigh` are Codex reasoning efforts.
+- `64K Safe` is the conservative Droid streaming profile.
+- `128K Max` uses the official GPT-5.5 maximum output budget and should be treated as aggressive until long streaming is benchmarked.
+
 Use the `openai` provider when you want Droid to call `POST /v1/responses`.
 
 Use `generic-chat-completion-api` when you want Droid to call `POST /v1/chat/completions`.
+
+Mission mode requires the `openai` provider. Droid sends mission actions as OpenAI Responses tools, and `cagent` translates Codex's tool-call signal back into Responses `function_call` stream events for Droid to execute.
+
+Droid's LLM-visible mission tool names are PascalCase. `cagent` preserves those exact names in the streamed `function_call`, while accepting snake_case and kebab-case aliases when Codex emits them:
+
+| Droid function name | Common aliases accepted by cagent | Where it is used |
+| --- | --- | --- |
+| `ProposeMission` | `propose_mission`, `propose-mission` | Orchestrator proposes and initializes a mission |
+| `StartMissionRun` | `start_mission_run`, `start-mission-run` | Orchestrator starts or resumes the mission runner |
+| `DismissHandoffItems` | `dismiss_handoff_items`, `dismiss-handoff-items` | Orchestrator dismisses explicit handoff items |
+| `EndFeatureRun` | `end_feature_run`, `end-feature-run` | Worker reports feature completion and hands off |
+
+Pause/resume controls are split in Droid. `StartMissionRun` is the LLM tool used to resume a paused mission, including `resumeWorkerSessionId` and `restartFeature`. Pausing itself is not an LLM tool; Droid handles it internally through session interruption (`droid.interrupt_session`) and records `mission_paused` in mission progress.
+
+For a new mission, `ProposeMission` is only the proposal step. After the user accepts the proposal, the orchestrator must create the runner artifacts before calling `StartMissionRun`:
+
+- `features.json`
+- `validation-contract.md`
+- `validation-state.json`
+- `AGENTS.md`
+- `services.yaml`
+- `skills/<skillName>/SKILL.md`
+
+For worker sessions, returning a normal assistant message is not enough to finish the feature. The worker must call `EndFeatureRun` with the structured handoff payload after implementation or when blocked.
+
+When the deterministic mission-resume bridge fires, the server logs:
+
+```text
+responses tool bridge auto_call tool=StartMissionRun
+```
+
+For other client tools, `cagent` asks Codex to emit:
+
+```json
+{"cagent_tool_call":{"name":"StartMissionRun","arguments":{"resumeWorkerSessionId":"..."}}}
+```
+
+and returns the matching Droid Responses `function_call` stream events.
 
 ## Model selection
 
@@ -112,7 +175,7 @@ Factory custom models are selected with the `custom:` prefix. The exact alias de
 Example:
 
 ```sh
-droid exec --model "custom:cagent-GPT-5.5-64K-Safe-0" "analyze this repository"
+droid exec --model "custom:cagent-GPT-5.5-XHigh-128K-Max-5" "analyze this repository"
 ```
 
 ## Reasoning profiles
@@ -127,7 +190,7 @@ The most reliable way to force Codex reasoning through Droid is to put the cagen
   "apiKey": "local-cagent-token",
   "provider": "openai",
   "maxContextLimit": 1000000,
-  "maxOutputTokens": 64000
+  "maxOutputTokens": 128000
 }
 ```
 
@@ -156,9 +219,11 @@ Current known values:
 | `gpt-5.2-codex` | 400000 | 128000 | 64000 |
 | `gpt-5-codex` | 400000 | 128000 | 64000 |
 
+OpenAI's current model catalog lists `gpt-5.5` with `128K` max output and reasoning levels including `xhigh`: https://developers.openai.com/api/docs/models
+
 `64000` is the safer default until the full Droid to cagent to Codex path is benchmarked with long streaming.
 
-`128000` is the official max output for the listed OpenAI models, but it should be treated as an aggressive profile.
+`128000` is the official max output for GPT-5.5 and the listed OpenAI models, including when the reasoning effort is `xhigh`; it should be treated as an aggressive profile for Droid streaming.
 
 ## Local capability matrix
 

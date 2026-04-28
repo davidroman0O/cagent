@@ -223,6 +223,18 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	toolNames := compat.ResponsesToolNames(req.Tools)
+	s.logger.Printf("responses request model=%s stream=%t tool_count=%d tool_names=%q", req.Model, req.Stream, len(toolNames), strings.Join(toolNames, ","))
+	id := newID("resp")
+	if call, ok := compat.AutoResponsesToolCall(req, toolNames); ok {
+		s.logger.Printf("responses tool bridge auto_call tool=%s", call.Name)
+		if req.Stream {
+			writeResponsesFunctionCallSSE(w, id, req.Model, *call)
+			return
+		}
+		writeJSON(w, http.StatusOK, compat.NewResponsesFunctionCallObject(id, req.Model, *call, nil))
+		return
+	}
 	agentReq := compat.ResponsesToAgent(req, s.defaults)
 	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
 	defer cancel()
@@ -231,14 +243,33 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForRuntimeError(err), err)
 		return
 	}
-	id := newID("resp")
 	if req.Stream {
+		if len(toolNames) > 0 {
+			text, usage, err := collect(events)
+			if err != nil {
+				writeError(w, statusForRuntimeError(err), err)
+				return
+			}
+			if call, ok := compat.ParseResponsesToolCall(text, toolNames); ok {
+				s.logger.Printf("responses tool bridge parsed_call tool=%s", call.Name)
+				writeResponsesFunctionCallSSE(w, id, agentReq.Model, *call)
+				return
+			}
+			_ = usage
+			writeResponsesCollectedTextSSE(w, id, agentReq.Model, text)
+			return
+		}
 		writeResponsesSSE(w, id, agentReq.Model, events)
 		return
 	}
 	text, usage, err := collect(events)
 	if err != nil {
 		writeError(w, statusForRuntimeError(err), err)
+		return
+	}
+	if call, ok := compat.ParseResponsesToolCall(text, toolNames); ok {
+		s.logger.Printf("responses tool bridge parsed_call tool=%s", call.Name)
+		writeJSON(w, http.StatusOK, compat.NewResponsesFunctionCallObject(id, agentReq.Model, *call, usage))
 		return
 	}
 	writeJSON(w, http.StatusOK, compat.NewResponsesObject(id, agentReq.Model, text, usage))

@@ -180,6 +180,43 @@ func TestResponsesNonStreaming(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamingToolBridge(t *testing.T) {
+	srv := testServer(t, []agent.AgentEvent{
+		{Type: agent.EventMessage, Message: `{"cagent_tool_call":{"name":"start_mission_run","arguments":{"resumeWorkerSessionId":"abc"}}}`},
+		{Type: agent.EventDone, Final: `{"cagent_tool_call":{"name":"start_mission_run","arguments":{"resumeWorkerSessionId":"abc"}}}`},
+	}, "")
+	body := []byte(`{
+		"model":"test-model",
+		"stream":true,
+		"input":"do work",
+		"tools":[{
+			"type":"function",
+			"name":"StartMissionRun",
+			"description":"Start the mission runner",
+			"parameters":{"type":"object","properties":{"resumeWorkerSessionId":{"type":"string"}}}
+		}]
+	}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	for _, want := range []string{
+		"event: response.output_item.added",
+		`"type":"function_call"`,
+		`"name":"StartMissionRun"`,
+		"event: response.function_call_arguments.delta",
+		`\"resumeWorkerSessionId\":\"abc\"`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stream missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func testServer(t *testing.T, events []agent.AgentEvent, token string) *Server {
 	t.Helper()
 	return testServerWithOptions(t, events, token, Options{

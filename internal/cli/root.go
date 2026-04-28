@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/davidroman0O/cagent/internal/bench"
 	"github.com/davidroman0O/cagent/internal/compat"
 	"github.com/davidroman0O/cagent/internal/config"
+	"github.com/davidroman0O/cagent/internal/droid"
 	"github.com/davidroman0O/cagent/internal/modelcaps"
 	"github.com/davidroman0O/cagent/internal/provider"
 	aruntime "github.com/davidroman0O/cagent/internal/runtime"
@@ -39,6 +41,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(NewServeCommand(version))
 	cmd.AddCommand(NewBenchCommand(version))
 	cmd.AddCommand(NewModelsCommand(version))
+	cmd.AddCommand(NewDroidCommand(version))
 	return cmd
 }
 
@@ -178,6 +181,200 @@ func NewModelsCommand(version string) *cobra.Command {
 	return cmd
 }
 
+func NewDroidCommand(version string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "droid",
+		Short:         "Configure and launch Factory Droid through cagent",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+	}
+	cmd.SetVersionTemplate("cagent droid {{.Version}}\n")
+	cmd.AddCommand(NewDroidSetupCommand(version))
+	cmd.AddCommand(NewDroidDoctorCommand(version))
+	cmd.AddCommand(NewDroidExecCommand(version))
+	cmd.AddCommand(NewDroidLaunchCommand(version))
+	return cmd
+}
+
+func NewDroidSetupCommand(version string) *cobra.Command {
+	opts := droid.NormalizeSetupOptions(droid.SetupOptions{
+		SetSessionDefault:  true,
+		SetMissionDefaults: true,
+		SkipScrutiny:       true,
+		SkipUserTesting:    true,
+		Backup:             true,
+	})
+	cmd := &cobra.Command{
+		Use:           "setup",
+		Short:         "Write Droid custom models, mission defaults, and 1M compaction settings",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			result, err := droid.ApplySettingsFile(opts)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "updated %s\n", result.SettingsPath)
+			if result.BackupPath != "" {
+				fmt.Fprintf(out, "backup %s\n", result.BackupPath)
+			}
+			fmt.Fprintf(out, "selected model %s\n", result.SelectedModelID)
+			fmt.Fprintf(out, "custom models %d\n", len(result.CustomModelIDs))
+			fmt.Fprintf(out, "compaction keys %d\n", len(result.CompactionKeys))
+			if result.SessionDefaultSet {
+				fmt.Fprintln(out, "session default set")
+			}
+			if result.MissionDefaultsSet {
+				fmt.Fprintln(out, "mission defaults set")
+			}
+			return nil
+		},
+	}
+	cmd.SetVersionTemplate("cagent droid setup {{.Version}}\n")
+
+	flags := cmd.Flags()
+	flags.StringVar(&opts.SettingsPath, "settings", opts.SettingsPath, "Factory Droid settings.json path")
+	flags.StringVar(&opts.BaseURL, "base-url", opts.BaseURL, "cagent OpenAI-compatible base URL")
+	flags.StringVar(&opts.APIToken, "api-token", opts.APIToken, "Droid custom model API token; defaults to CAGENT_TOKEN or local-cagent-token")
+	flags.StringVar(&opts.CodexModel, "codex-model", opts.CodexModel, "Codex model to expose through cagent")
+	flags.StringVar(&opts.ReasoningEffort, "reasoning-effort", opts.ReasoningEffort, "Droid and Codex reasoning effort")
+	flags.IntVar(&opts.MaxContextLimit, "max-context-limit", opts.MaxContextLimit, "Droid custom model maxContextLimit")
+	flags.IntVar(&opts.CompactionTokenLimit, "compaction-token-limit", opts.CompactionTokenLimit, "Droid compaction limit for cagent models")
+	flags.IntVar(&opts.SafeMaxOutputTokens, "safe-max-output-tokens", opts.SafeMaxOutputTokens, "safe Droid maxOutputTokens profile")
+	flags.IntVar(&opts.MaxOutputTokens, "max-output-tokens", opts.MaxOutputTokens, "aggressive Droid maxOutputTokens profile")
+	flags.BoolVar(&opts.SetSessionDefault, "set-session-default", opts.SetSessionDefault, "set Droid's default interactive model to cagent")
+	flags.BoolVar(&opts.SetMissionDefaults, "set-mission-defaults", opts.SetMissionDefaults, "set Droid orchestrator, worker, and validator models to cagent")
+	flags.BoolVar(&opts.SkipScrutiny, "skip-scrutiny", opts.SkipScrutiny, "skip Droid's automatic scrutiny validator for faster out-of-box missions")
+	flags.BoolVar(&opts.SkipUserTesting, "skip-user-testing", opts.SkipUserTesting, "skip Droid's automatic user-testing validator for faster out-of-box missions")
+	flags.BoolVar(&opts.Backup, "backup", opts.Backup, "write a timestamped settings backup before updating")
+	return cmd
+}
+
+func NewDroidDoctorCommand(version string) *cobra.Command {
+	opts := droid.NormalizeSetupOptions(droid.SetupOptions{
+		SetSessionDefault:  true,
+		SetMissionDefaults: true,
+		SkipScrutiny:       true,
+		SkipUserTesting:    true,
+	})
+	cmd := &cobra.Command{
+		Use:           "doctor",
+		Short:         "Check whether Droid is configured for cagent mission mode",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			report, err := droid.CheckSettingsFile(opts)
+			if err != nil {
+				return err
+			}
+			for _, check := range report.Checks {
+				status := "ok"
+				if !check.OK {
+					status = "fix"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "[%s] %s\n", status, check.Message)
+			}
+			if !report.OK {
+				return fmt.Errorf("Droid settings are not cagent-ready; run cagent droid setup")
+			}
+			return nil
+		},
+	}
+	cmd.SetVersionTemplate("cagent droid doctor {{.Version}}\n")
+
+	flags := cmd.Flags()
+	flags.StringVar(&opts.SettingsPath, "settings", opts.SettingsPath, "Factory Droid settings.json path")
+	flags.StringVar(&opts.BaseURL, "base-url", opts.BaseURL, "expected cagent base URL")
+	flags.StringVar(&opts.APIToken, "api-token", opts.APIToken, "expected API token; defaults to CAGENT_TOKEN or local-cagent-token")
+	flags.StringVar(&opts.CodexModel, "codex-model", opts.CodexModel, "expected Codex model")
+	flags.StringVar(&opts.ReasoningEffort, "reasoning-effort", opts.ReasoningEffort, "expected reasoning effort")
+	flags.IntVar(&opts.CompactionTokenLimit, "compaction-token-limit", opts.CompactionTokenLimit, "expected compaction limit")
+	flags.IntVar(&opts.MaxContextLimit, "max-context-limit", opts.MaxContextLimit, "expected maxContextLimit")
+	flags.BoolVar(&opts.SkipScrutiny, "skip-scrutiny", opts.SkipScrutiny, "expected skipScrutiny value")
+	flags.BoolVar(&opts.SkipUserTesting, "skip-user-testing", opts.SkipUserTesting, "expected skipUserTesting value")
+	return cmd
+}
+
+func NewDroidExecCommand(version string) *cobra.Command {
+	droidBin := "droid"
+	printOnly := false
+	opts := droid.ExecOptions{
+		Mission:         true,
+		Model:           droid.DefaultSelectedModelID(droid.DefaultCodexModel, droid.DefaultReasoningEffort),
+		ReasoningEffort: droid.DefaultReasoningEffort,
+	}
+	cmd := &cobra.Command{
+		Use:           "exec [prompt]",
+		Short:         "Run droid exec with cagent mission model overrides",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			droidArgs := droid.ExecArgs(opts, args)
+			if printOnly {
+				fmt.Fprintln(cmd.OutOrStdout(), shellCommand(droidBin, droidArgs))
+				return nil
+			}
+			return runExternal(cmd.Context(), droidBin, droidArgs)
+		},
+	}
+	cmd.SetVersionTemplate("cagent droid exec {{.Version}}\n")
+
+	flags := cmd.Flags()
+	flags.StringVar(&droidBin, "droid-bin", droidBin, "Droid binary path")
+	flags.BoolVar(&printOnly, "print", printOnly, "print the droid command without running it")
+	flags.StringVar(&opts.SettingsPath, "settings", opts.SettingsPath, "runtime settings file to pass to Droid")
+	flags.StringVar(&opts.CWD, "cwd", opts.CWD, "working directory for Droid")
+	flags.StringVar(&opts.Model, "model", opts.Model, "Droid orchestrator model id")
+	flags.StringVar(&opts.ReasoningEffort, "reasoning-effort", opts.ReasoningEffort, "Droid orchestrator reasoning effort")
+	flags.BoolVar(&opts.Mission, "mission", opts.Mission, "run droid exec in mission mode")
+	flags.StringVar(&opts.Auto, "auto", opts.Auto, "Droid autonomy level")
+	flags.StringVar(&opts.WorkerModel, "worker-model", opts.WorkerModel, "Droid mission worker model id")
+	flags.StringVar(&opts.WorkerReasoningEffort, "worker-reasoning-effort", opts.WorkerReasoningEffort, "Droid mission worker reasoning effort")
+	flags.StringVar(&opts.ValidatorModel, "validator-model", opts.ValidatorModel, "Droid mission validator model id")
+	flags.StringVar(&opts.ValidatorReasoningEffort, "validator-reasoning-effort", opts.ValidatorReasoningEffort, "Droid mission validator reasoning effort")
+	flags.BoolVar(&opts.ListTools, "list-tools", opts.ListTools, "list Droid tools for the selected model")
+	return cmd
+}
+
+func NewDroidLaunchCommand(version string) *cobra.Command {
+	droidBin := "droid"
+	settingsPath := ""
+	cwd := ""
+	printOnly := false
+	cmd := &cobra.Command{
+		Use:           "launch [prompt]",
+		Short:         "Launch interactive Droid after cagent droid setup",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			droidArgs := droid.LaunchArgs(settingsPath, cwd, args)
+			if printOnly {
+				fmt.Fprintln(cmd.OutOrStdout(), shellCommand(droidBin, droidArgs))
+				return nil
+			}
+			return runExternal(cmd.Context(), droidBin, droidArgs)
+		},
+	}
+	cmd.SetVersionTemplate("cagent droid launch {{.Version}}\n")
+	flags := cmd.Flags()
+	flags.StringVar(&droidBin, "droid-bin", droidBin, "Droid binary path")
+	flags.StringVar(&settingsPath, "settings", settingsPath, "runtime settings file to pass to Droid")
+	flags.StringVar(&cwd, "cwd", cwd, "working directory for Droid")
+	flags.BoolVar(&printOnly, "print", printOnly, "print the droid command without running it")
+	return cmd
+}
+
 func RunServe(ctx context.Context, cfg config.Config, logger *log.Logger) error {
 	if logger == nil {
 		logger = log.Default()
@@ -238,6 +435,23 @@ func RunServe(ctx context.Context, cfg config.Config, logger *log.Logger) error 
 		}
 		return nil
 	}
+}
+
+func runExternal(ctx context.Context, bin string, args []string) error {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func shellCommand(bin string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, strconv.Quote(bin))
+	for _, arg := range args {
+		parts = append(parts, strconv.Quote(arg))
+	}
+	return strings.Join(parts, " ")
 }
 
 func parseTargets(value string) ([]int, error) {

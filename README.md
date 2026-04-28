@@ -31,7 +31,7 @@ Running `cagent` without a subcommand also starts the server for compatibility.
 
 Release binaries include:
 
-- `cagent`, with `serve`, `bench`, and `models` subcommands
+- `cagent`, with `serve`, `bench`, `models`, and `droid` subcommands
 
 Create a GitHub release by pushing a version tag:
 
@@ -88,7 +88,53 @@ If requests omit reasoning, set a server-wide default with `CAGENT_DEFAULT_REASO
 
 cagent forwards this to Codex as `-c model_reasoning_effort="..."`.
 
-For Factory Droid BYOK, set both Droid's hidden `maxContextLimit` custom-model field and `compactionTokenLimitPerModel`. Droid's `/context` command displays the compaction limit, and the default is 250000 unless overridden in `~/.factory/settings.json`. Use the `openai` provider for mission mode; Droid sends mission actions as Responses tools with names like `ProposeMission`, `StartMissionRun`, `DismissHandoffItems`, and `EndFeatureRun`. See [docs/droid-settings/README.md](/Users/davidroman/Documents/code/github/cagent/docs/droid-settings/README.md).
+## Droid-First Setup
+
+Configure Factory Droid to use cagent for the main session and all mission roles:
+
+```sh
+cagent droid setup
+cagent droid doctor
+```
+
+From source:
+
+```sh
+go run ./cmd/cagent droid setup
+go run ./cmd/cagent droid doctor
+```
+
+Then run cagent with the Codex 1M overrides:
+
+```sh
+CAGENT_TOKEN=local-cagent-token cagent serve \
+  --addr :8080 \
+  --model-context-window 1000000 \
+  --model-auto-compact-token-limit 900000 \
+  --default-reasoning-effort xhigh
+```
+
+Launch interactive Droid normally after setup:
+
+```sh
+cagent droid launch --cwd /path/to/repo
+```
+
+For non-interactive mission runs, cagent can pass all Droid mission model overrides directly:
+
+```sh
+cagent droid exec --cwd /path/to/repo "implement the mission"
+```
+
+The default Droid model id is `custom:cagent-gpt-5-5-xhigh-128k-max`. `cagent droid setup` writes that exact id into Droid's session default, mission orchestrator, mission worker, mission validator, and `compactionTokenLimitPerModel`, so `/context` uses the 900K compaction threshold instead of Droid's 250K custom-model fallback.
+
+The default setup also sets Droid mission `skipScrutiny` and `skipUserTesting` to `true` because the implementation worker path is the part needed for reliable out-of-box missions, while Droid's automatic validator workers are currently the slowest and most failure-prone path through BYOK/cagent. To exercise all validation workers too:
+
+```sh
+cagent droid setup --skip-scrutiny=false --skip-user-testing=false
+```
+
+For Factory Droid BYOK, use the `openai` provider for mission mode; Droid sends mission actions as Responses tools with names like `ProposeMission`, `StartMissionRun`, `DismissHandoffItems`, and `EndFeatureRun`. See [docs/droid-settings/README.md](/Users/davidroman/Documents/code/github/cagent/docs/droid-settings/README.md).
 
 Model ids can carry provider and reasoning hints:
 

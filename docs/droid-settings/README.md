@@ -39,21 +39,81 @@ cagent serve \
   --default-reasoning-effort xhigh
 ```
 
+## One-command setup
+
+Run:
+
+```sh
+cagent droid setup
+cagent droid doctor
+```
+
+From source:
+
+```sh
+go run ./cmd/cagent droid setup
+go run ./cmd/cagent droid doctor
+```
+
+`setup` updates `~/.factory/settings.json`, writes a timestamped backup, and makes cagent the default for the main Droid session plus all three mission roles: orchestrator, worker, and validator.
+
+By default, setup skips Droid's automatic milestone scrutiny and user-testing validators. The implementation worker still runs through Droid Mission mode and still calls `EndFeatureRun`; this default avoids the extra validation workers that currently make BYOK/cagent missions slow and brittle. To force the full Droid validation phase, run:
+
+```sh
+cagent droid setup --skip-scrutiny=false --skip-user-testing=false
+```
+
+The selected custom model id is stable:
+
+```text
+custom:cagent-gpt-5-5-xhigh-128k-max
+```
+
+Use `cagent droid launch --cwd /path/to/repo` to start interactive Droid after setup.
+
+Use `cagent droid exec --cwd /path/to/repo "mission prompt"` for non-interactive mission runs. That wrapper passes Droid's `--model`, `--worker-model`, and `--validator-model` flags directly.
+
 ## Recommended settings.json
 
-Add this to `~/.factory/settings.json`:
+`cagent droid setup` writes the equivalent of this to `~/.factory/settings.json`:
 
 ```json
 {
+  "sessionDefaultSettings": {
+    "interactionMode": "auto",
+    "autonomyLevel": "high",
+    "autonomyMode": "auto-high",
+    "model": "custom:cagent-gpt-5-5-xhigh-128k-max",
+    "reasoningEffort": "xhigh"
+  },
+  "missionOrchestratorModel": "custom:cagent-gpt-5-5-xhigh-128k-max",
+  "missionOrchestratorReasoningEffort": "xhigh",
+  "missionModelSettings": {
+    "workerModel": "custom:cagent-gpt-5-5-xhigh-128k-max",
+    "workerReasoningEffort": "xhigh",
+    "validationWorkerModel": "custom:cagent-gpt-5-5-xhigh-128k-max",
+    "validationWorkerReasoningEffort": "xhigh",
+    "skipScrutiny": true,
+    "skipUserTesting": true
+  },
+  "compactionTokenLimit": 900000,
   "compactionTokenLimitPerModel": {
     "gpt-5.5": 900000,
     "codex-default": 900000,
     "codex:gpt-5.5:medium": 900000,
     "codex:gpt-5.5:high": 900000,
-    "codex:gpt-5.5:xhigh": 900000
+    "codex:gpt-5.5:xhigh": 900000,
+    "custom:cagent-gpt-5-5-medium-64k-safe": 900000,
+    "custom:cagent-gpt-5-5-medium-128k-max": 900000,
+    "custom:cagent-gpt-5-5-high-64k-safe": 900000,
+    "custom:cagent-gpt-5-5-high-128k-max": 900000,
+    "custom:cagent-gpt-5-5-xhigh-64k-safe": 900000,
+    "custom:cagent-gpt-5-5-xhigh-128k-max": 900000,
+    "custom:cagent-codex-default-chat-64k-safe": 900000
   },
   "customModels": [
     {
+      "id": "custom:cagent-gpt-5-5-medium-64k-safe",
       "model": "codex:gpt-5.5:medium",
       "displayName": "cagent GPT-5.5 Medium 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
@@ -63,6 +123,7 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 64000
     },
     {
+      "id": "custom:cagent-gpt-5-5-medium-128k-max",
       "model": "codex:gpt-5.5:medium",
       "displayName": "cagent GPT-5.5 Medium 128K Max",
       "baseUrl": "http://localhost:8080/v1",
@@ -72,6 +133,7 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 128000
     },
     {
+      "id": "custom:cagent-gpt-5-5-high-64k-safe",
       "model": "codex:gpt-5.5:high",
       "displayName": "cagent GPT-5.5 High 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
@@ -81,6 +143,7 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 64000
     },
     {
+      "id": "custom:cagent-gpt-5-5-high-128k-max",
       "model": "codex:gpt-5.5:high",
       "displayName": "cagent GPT-5.5 High 128K Max",
       "baseUrl": "http://localhost:8080/v1",
@@ -90,6 +153,7 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 128000
     },
     {
+      "id": "custom:cagent-gpt-5-5-xhigh-64k-safe",
       "model": "codex:gpt-5.5:xhigh",
       "displayName": "cagent GPT-5.5 XHigh 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
@@ -99,6 +163,7 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 64000
     },
     {
+      "id": "custom:cagent-gpt-5-5-xhigh-128k-max",
       "model": "codex:gpt-5.5:xhigh",
       "displayName": "cagent GPT-5.5 XHigh 128K Max",
       "baseUrl": "http://localhost:8080/v1",
@@ -108,6 +173,7 @@ Add this to `~/.factory/settings.json`:
       "maxOutputTokens": 128000
     },
     {
+      "id": "custom:cagent-codex-default-chat-64k-safe",
       "model": "codex-default",
       "displayName": "cagent Codex Default Chat 64K Safe",
       "baseUrl": "http://localhost:8080/v1",
@@ -119,6 +185,8 @@ Add this to `~/.factory/settings.json`:
   ]
 }
 ```
+
+Droid's `/context` command uses the selected custom model id, not only the underlying `codex:gpt-5.5:xhigh` value. That is why the exact `custom:cagent-...` keys are required in `compactionTokenLimitPerModel`.
 
 Naming convention:
 
@@ -170,12 +238,12 @@ and returns the matching Droid Responses `function_call` stream events.
 
 ## Model selection
 
-Factory custom models are selected with the `custom:` prefix. The exact alias depends on Droid's custom model naming/indexing behavior.
+Factory custom models are selected with the `custom:` prefix. `cagent droid setup` gives them stable ids, so the XHigh 128K profile is:
 
 Example:
 
 ```sh
-droid exec --model "custom:cagent-GPT-5.5-XHigh-128K-Max-5" "analyze this repository"
+droid exec --model "custom:cagent-gpt-5-5-xhigh-128k-max" "analyze this repository"
 ```
 
 ## Reasoning profiles

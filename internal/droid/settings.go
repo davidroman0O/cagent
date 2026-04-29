@@ -22,6 +22,7 @@ const (
 	DefaultCompactionTokenLimit = 900000
 	DefaultSafeMaxOutputTokens  = 64000
 	DefaultMaxOutputTokens      = 128000
+	RuntimeSettingsPathEnv      = "FACTORY_RUNTIME_SETTINGS_PATH"
 )
 
 type SetupOptions struct {
@@ -49,6 +50,60 @@ type SetupResult struct {
 	CompactionKeys     []string
 	SessionDefaultSet  bool
 	MissionDefaultsSet bool
+}
+
+type MissionRepairOptions struct {
+	Setup       SetupOptions
+	MissionsDir string
+	Missions    []string
+	All         bool
+	DryRun      bool
+	Backup      bool
+}
+
+type MissionListOptions struct {
+	Setup           SetupOptions
+	MissionsDir     string
+	ActiveOnly      bool
+	NeedsRepairOnly bool
+}
+
+type MissionRepairResult struct {
+	MissionsDir string
+	Repaired    []MissionRepair
+	Skipped     []MissionRepairSkip
+}
+
+type MissionRepair struct {
+	Dir          string
+	ID           string
+	State        string
+	ChangedFiles []string
+	BackupPaths  []string
+}
+
+type MissionRepairSkip struct {
+	Dir    string
+	ID     string
+	State  string
+	Reason string
+}
+
+type MissionInfo struct {
+	Dir                             string `json:"dir"`
+	DirectoryID                     string `json:"directoryId"`
+	ID                              string `json:"id"`
+	State                           string `json:"state"`
+	WorkingDirectory                string `json:"workingDirectory"`
+	CreatedAt                       string `json:"createdAt"`
+	UpdatedAt                       string `json:"updatedAt"`
+	NeedsRepair                     bool   `json:"needsRepair"`
+	WorkerModel                     string `json:"workerModel,omitempty"`
+	WorkerReasoningEffort           string `json:"workerReasoningEffort,omitempty"`
+	ValidationWorkerModel           string `json:"validationWorkerModel,omitempty"`
+	ValidationWorkerReasoningEffort string `json:"validationWorkerReasoningEffort,omitempty"`
+	SkipScrutiny                    bool   `json:"skipScrutiny,omitempty"`
+	SkipUserTesting                 bool   `json:"skipUserTesting,omitempty"`
 }
 
 type Check struct {
@@ -87,6 +142,14 @@ func DefaultSettingsPath() string {
 		return filepath.Join(".factory", "settings.json")
 	}
 	return filepath.Join(home, ".factory", "settings.json")
+}
+
+func DefaultMissionsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(".factory", "missions")
+	}
+	return filepath.Join(home, ".factory", "missions")
 }
 
 func NormalizeSetupOptions(opts SetupOptions) SetupOptions {
@@ -161,6 +224,44 @@ func ApplySettingsFile(opts SetupOptions) (SetupResult, error) {
 	return result, nil
 }
 
+func WriteRuntimeSettingsFile(path string, opts SetupOptions) (string, error) {
+	opts = NormalizeSetupOptions(opts)
+	opts.SetSessionDefault = true
+	opts.SetMissionDefaults = true
+	settings := map[string]any{}
+	ApplySettings(settings, opts)
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	if path == "" {
+		if err := os.MkdirAll(filepath.Join(os.TempDir(), "cagent"), 0o755); err != nil {
+			return "", err
+		}
+		file, err := os.CreateTemp(filepath.Join(os.TempDir(), "cagent"), "droid-settings-*.json")
+		if err != nil {
+			return "", err
+		}
+		path = file.Name()
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func CheckSettingsFile(opts SetupOptions) (Report, error) {
 	opts = NormalizeSetupOptions(opts)
 	settings, err := readSettings(opts.SettingsPath)
@@ -168,6 +269,176 @@ func CheckSettingsFile(opts SetupOptions) (Report, error) {
 		return Report{}, err
 	}
 	return CheckSettings(settings, opts), nil
+}
+
+func ListMissions(opts MissionListOptions) ([]MissionInfo, error) {
+	opts.Setup = NormalizeSetupOptions(opts.Setup)
+	if opts.MissionsDir == "" {
+		opts.MissionsDir = DefaultMissionsDir()
+	}
+	entries, err := os.ReadDir(opts.MissionsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	repairScan, err := RepairMissions(MissionRepairOptions{
+		Setup:       opts.Setup,
+		MissionsDir: opts.MissionsDir,
+		DryRun:      true,
+		Backup:      false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	needsRepair := map[string]bool{}
+	for _, repair := range repairScan.Repaired {
+		needsRepair[repair.Dir] = true
+	}
+
+	missions := make([]MissionInfo, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(opts.MissionsDir, entry.Name())
+		stateMap, err := readJSONMap(filepath.Join(dir, "state.json"))
+		if err != nil {
+			return nil, err
+		}
+		state := stringValue(stateMap["state"])
+		if opts.ActiveOnly && !shouldRepairMissionState(state, false) {
+			continue
+		}
+		if opts.NeedsRepairOnly && !needsRepair[dir] {
+			continue
+		}
+		modelSettings, err := readJSONMap(filepath.Join(dir, "model-settings.json"))
+		if err != nil {
+			return nil, err
+		}
+		info := MissionInfo{
+			Dir:                             dir,
+			DirectoryID:                     entry.Name(),
+			ID:                              firstString(stateMap["missionId"], entry.Name()),
+			State:                           state,
+			WorkingDirectory:                stringValue(stateMap["workingDirectory"]),
+			CreatedAt:                       stringValue(stateMap["createdAt"]),
+			UpdatedAt:                       stringValue(stateMap["updatedAt"]),
+			NeedsRepair:                     needsRepair[dir],
+			WorkerModel:                     stringValue(modelSettings["workerModel"]),
+			WorkerReasoningEffort:           stringValue(modelSettings["workerReasoningEffort"]),
+			ValidationWorkerModel:           stringValue(modelSettings["validationWorkerModel"]),
+			ValidationWorkerReasoningEffort: stringValue(modelSettings["validationWorkerReasoningEffort"]),
+			SkipScrutiny:                    boolValue(modelSettings["skipScrutiny"]),
+			SkipUserTesting:                 boolValue(modelSettings["skipUserTesting"]),
+		}
+		missions = append(missions, info)
+	}
+	sort.SliceStable(missions, func(i, j int) bool {
+		if missions[i].UpdatedAt != missions[j].UpdatedAt {
+			return missions[i].UpdatedAt > missions[j].UpdatedAt
+		}
+		return missions[i].DirectoryID < missions[j].DirectoryID
+	})
+	return missions, nil
+}
+
+func RepairMissions(opts MissionRepairOptions) (MissionRepairResult, error) {
+	opts.Setup = NormalizeSetupOptions(opts.Setup)
+	if opts.MissionsDir == "" {
+		opts.MissionsDir = DefaultMissionsDir()
+	}
+	result := MissionRepairResult{MissionsDir: opts.MissionsDir}
+	entries, err := os.ReadDir(opts.MissionsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+
+	targets := missionTargetSet(opts.Missions)
+	selectedID := DefaultSelectedModelID(opts.Setup.CodexModel, opts.Setup.ReasoningEffort)
+	profiles := Profiles(opts.Setup)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(opts.MissionsDir, entry.Name())
+		stateMap, err := readJSONMap(filepath.Join(dir, "state.json"))
+		if err != nil {
+			return result, err
+		}
+		missionID := firstString(stateMap["missionId"], entry.Name())
+		state := stringValue(stateMap["state"])
+		if len(targets) > 0 && !missionTargetMatches(targets, entry.Name(), missionID, dir) {
+			result.Skipped = append(result.Skipped, MissionRepairSkip{
+				Dir:    dir,
+				ID:     missionID,
+				State:  state,
+				Reason: "not selected",
+			})
+			continue
+		}
+		if !shouldRepairMissionState(state, opts.All) {
+			result.Skipped = append(result.Skipped, MissionRepairSkip{
+				Dir:    dir,
+				ID:     missionID,
+				State:  state,
+				Reason: "terminal state",
+			})
+			continue
+		}
+
+		repair := MissionRepair{Dir: dir, ID: missionID, State: state}
+		modelSettingsPath := filepath.Join(dir, "model-settings.json")
+		modelSettings, err := readJSONMap(modelSettingsPath)
+		if err != nil {
+			return result, err
+		}
+		changed := false
+		changed = setIfDifferent(modelSettings, "workerModel", selectedID) || changed
+		changed = setIfDifferent(modelSettings, "workerReasoningEffort", opts.Setup.ReasoningEffort) || changed
+		changed = setIfDifferent(modelSettings, "validationWorkerModel", selectedID) || changed
+		changed = setIfDifferent(modelSettings, "validationWorkerReasoningEffort", opts.Setup.ReasoningEffort) || changed
+		changed = setIfDifferent(modelSettings, "skipScrutiny", opts.Setup.SkipScrutiny) || changed
+		changed = setIfDifferent(modelSettings, "skipUserTesting", opts.Setup.SkipUserTesting) || changed
+		if changed {
+			backupPath, err := writeJSONMap(modelSettingsPath, modelSettings, opts.DryRun, opts.Backup)
+			if err != nil {
+				return result, err
+			}
+			repair.ChangedFiles = append(repair.ChangedFiles, modelSettingsPath)
+			if backupPath != "" {
+				repair.BackupPaths = append(repair.BackupPaths, backupPath)
+			}
+		}
+
+		runtimeModelsPath := filepath.Join(dir, "runtime-custom-models.json")
+		runtimeModels, err := readJSONMap(runtimeModelsPath)
+		if err != nil {
+			return result, err
+		}
+		runtimeModels["customModels"] = desiredCustomModels(runtimeModels["customModels"], profiles, opts.Setup)
+		if !jsonFileEqual(runtimeModelsPath, runtimeModels) {
+			backupPath, err := writeJSONMap(runtimeModelsPath, runtimeModels, opts.DryRun, opts.Backup)
+			if err != nil {
+				return result, err
+			}
+			repair.ChangedFiles = append(repair.ChangedFiles, runtimeModelsPath)
+			if backupPath != "" {
+				repair.BackupPaths = append(repair.BackupPaths, backupPath)
+			}
+		}
+
+		if len(repair.ChangedFiles) > 0 {
+			result.Repaired = append(result.Repaired, repair)
+		}
+	}
+	return result, nil
 }
 
 func CheckSettings(settings map[string]any, opts SetupOptions) Report {
@@ -436,6 +707,69 @@ func readSettings(path string) (map[string]any, error) {
 	return settings, nil
 }
 
+func readJSONMap(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return map[string]any{}, nil
+	}
+	var out map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&out); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return out, nil
+}
+
+func writeJSONMap(path string, value map[string]any, dryRun bool, backup bool) (string, error) {
+	if dryRun {
+		return "", nil
+	}
+	var backupPath string
+	var err error
+	if backup {
+		backupPath, err = backupFile(path)
+		if err != nil {
+			return "", err
+		}
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return backupPath, nil
+}
+
+func jsonFileEqual(path string, value map[string]any) bool {
+	existing, err := readJSONMap(path)
+	if err != nil {
+		return false
+	}
+	existingData, err := json.Marshal(existing)
+	if err != nil {
+		return false
+	}
+	nextData, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(existingData, nextData)
+}
+
 func backupFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -457,6 +791,46 @@ func backupFile(path string) (string, error) {
 		return "", err
 	}
 	return backupPath, nil
+}
+
+func shouldRepairMissionState(state string, all bool) bool {
+	if all {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "completed", "cancelled", "canceled":
+		return false
+	default:
+		return true
+	}
+}
+
+func missionTargetSet(values []string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out[value] = true
+		out[filepath.Base(value)] = true
+	}
+	return out
+}
+
+func missionTargetMatches(targets map[string]bool, dirName string, missionID string, dir string) bool {
+	if targets[dirName] || targets[missionID] || targets[dir] {
+		return true
+	}
+	return targets[filepath.Base(dir)]
+}
+
+func setIfDifferent(obj map[string]any, key string, value any) bool {
+	if obj[key] == value {
+		return false
+	}
+	obj[key] = value
+	return true
 }
 
 func desiredCustomModels(existingValue any, profiles []ModelProfile, opts SetupOptions) []map[string]any {

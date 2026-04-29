@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/davidroman0O/cagent/internal/agent"
@@ -193,6 +196,8 @@ func NewDroidCommand(version string) *cobra.Command {
 	cmd.SetVersionTemplate("cagent droid {{.Version}}\n")
 	cmd.AddCommand(NewDroidSetupCommand(version))
 	cmd.AddCommand(NewDroidDoctorCommand(version))
+	cmd.AddCommand(NewDroidMissionsCommand(version))
+	cmd.AddCommand(NewDroidRepairMissionsCommand(version))
 	cmd.AddCommand(NewDroidExecCommand(version))
 	cmd.AddCommand(NewDroidLaunchCommand(version))
 	return cmd
@@ -232,6 +237,7 @@ func NewDroidSetupCommand(version string) *cobra.Command {
 			if result.MissionDefaultsSet {
 				fmt.Fprintln(out, "mission defaults set")
 			}
+			fmt.Fprintln(out, "restart any already-running Droid sessions so they reload BYOK settings")
 			return nil
 		},
 	}
@@ -284,6 +290,21 @@ func NewDroidDoctorCommand(version string) *cobra.Command {
 			if !report.OK {
 				return fmt.Errorf("Droid settings are not cagent-ready; run cagent droid setup")
 			}
+			missionScan, err := droid.RepairMissions(droid.MissionRepairOptions{
+				Setup:       opts,
+				MissionsDir: droid.DefaultMissionsDir(),
+				DryRun:      true,
+				Backup:      false,
+			})
+			if err == nil && len(missionScan.Repaired) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "[warn] %d active Droid missions differ from the current cagent mission snapshot; run cagent droid repair-missions --mission <id> before resuming one of them\n", len(missionScan.Repaired))
+			}
+			if processes := runningDroidProcesses(); len(processes) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "[warn] running Droid processes may have cached older BYOK settings; restart Droid after setup")
+				for _, process := range processes {
+					fmt.Fprintf(cmd.OutOrStdout(), "[warn] %s\n", process)
+				}
+			}
 			return nil
 		},
 	}
@@ -299,6 +320,127 @@ func NewDroidDoctorCommand(version string) *cobra.Command {
 	flags.IntVar(&opts.MaxContextLimit, "max-context-limit", opts.MaxContextLimit, "expected maxContextLimit")
 	flags.BoolVar(&opts.SkipScrutiny, "skip-scrutiny", opts.SkipScrutiny, "expected skipScrutiny value")
 	flags.BoolVar(&opts.SkipUserTesting, "skip-user-testing", opts.SkipUserTesting, "expected skipUserTesting value")
+	return cmd
+}
+
+func NewDroidMissionsCommand(version string) *cobra.Command {
+	opts := droid.MissionListOptions{
+		Setup: droid.NormalizeSetupOptions(droid.SetupOptions{
+			SkipScrutiny:    true,
+			SkipUserTesting: true,
+		}),
+		MissionsDir: droid.DefaultMissionsDir(),
+	}
+	format := "table"
+	cmd := &cobra.Command{
+		Use:           "missions",
+		Aliases:       []string{"list-missions", "ls-missions"},
+		Short:         "List Droid missions and their cagent repair status",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			missions, err := droid.ListMissions(opts)
+			if err != nil {
+				return err
+			}
+			switch format {
+			case "json":
+				encoder := json.NewEncoder(cmd.OutOrStdout())
+				encoder.SetIndent("", "  ")
+				return encoder.Encode(missions)
+			case "table":
+				return printDroidMissionsTable(cmd.OutOrStdout(), missions)
+			default:
+				return fmt.Errorf("unknown format: %s", format)
+			}
+		},
+	}
+	cmd.SetVersionTemplate("cagent droid missions {{.Version}}\n")
+
+	flags := cmd.Flags()
+	flags.StringVar(&opts.MissionsDir, "missions-dir", opts.MissionsDir, "Factory Droid missions directory")
+	flags.BoolVar(&opts.ActiveOnly, "active", opts.ActiveOnly, "show only non-terminal missions")
+	flags.BoolVar(&opts.NeedsRepairOnly, "needs-repair", opts.NeedsRepairOnly, "show only missions that differ from the current cagent mission snapshot")
+	flags.StringVar(&format, "format", format, "output format: table or json")
+	flags.StringVar(&opts.Setup.BaseURL, "base-url", opts.Setup.BaseURL, "expected cagent OpenAI-compatible base URL")
+	flags.StringVar(&opts.Setup.APIToken, "api-token", opts.Setup.APIToken, "expected Droid custom model API token; defaults to CAGENT_TOKEN or local-cagent-token")
+	flags.StringVar(&opts.Setup.CodexModel, "codex-model", opts.Setup.CodexModel, "expected Codex model")
+	flags.StringVar(&opts.Setup.ReasoningEffort, "reasoning-effort", opts.Setup.ReasoningEffort, "expected Droid and Codex reasoning effort")
+	flags.IntVar(&opts.Setup.MaxContextLimit, "max-context-limit", opts.Setup.MaxContextLimit, "expected Droid custom model maxContextLimit")
+	flags.IntVar(&opts.Setup.SafeMaxOutputTokens, "safe-max-output-tokens", opts.Setup.SafeMaxOutputTokens, "expected safe Droid maxOutputTokens profile")
+	flags.IntVar(&opts.Setup.MaxOutputTokens, "max-output-tokens", opts.Setup.MaxOutputTokens, "expected aggressive Droid maxOutputTokens profile")
+	flags.BoolVar(&opts.Setup.SkipScrutiny, "skip-scrutiny", opts.Setup.SkipScrutiny, "expected mission skipScrutiny")
+	flags.BoolVar(&opts.Setup.SkipUserTesting, "skip-user-testing", opts.Setup.SkipUserTesting, "expected mission skipUserTesting")
+	return cmd
+}
+
+func NewDroidRepairMissionsCommand(version string) *cobra.Command {
+	opts := droid.MissionRepairOptions{
+		Setup: droid.NormalizeSetupOptions(droid.SetupOptions{
+			SkipScrutiny:    true,
+			SkipUserTesting: true,
+		}),
+		MissionsDir: droid.DefaultMissionsDir(),
+		Backup:      true,
+	}
+	cmd := &cobra.Command{
+		Use:           "repair-missions",
+		Short:         "Repair existing Droid mission snapshots to use current cagent models",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			result, err := droid.RepairMissions(opts)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "missions dir %s\n", result.MissionsDir)
+			if opts.DryRun {
+				fmt.Fprintf(out, "would repair %d missions\n", len(result.Repaired))
+			} else {
+				fmt.Fprintf(out, "repaired %d missions\n", len(result.Repaired))
+			}
+			for _, repair := range result.Repaired {
+				state := repair.State
+				if state == "" {
+					state = "unknown"
+				}
+				fmt.Fprintf(out, "- %s (%s): %d files\n", repair.ID, state, len(repair.ChangedFiles))
+				for _, file := range repair.ChangedFiles {
+					fmt.Fprintf(out, "  changed %s\n", file)
+				}
+				for _, backup := range repair.BackupPaths {
+					fmt.Fprintf(out, "  backup %s\n", backup)
+				}
+			}
+			fmt.Fprintf(out, "skipped %d missions\n", len(result.Skipped))
+			if !opts.DryRun && len(result.Repaired) > 0 {
+				fmt.Fprintln(out, "restart Droid before resuming repaired missions")
+			}
+			return nil
+		},
+	}
+	cmd.SetVersionTemplate("cagent droid repair-missions {{.Version}}\n")
+
+	flags := cmd.Flags()
+	flags.StringVar(&opts.MissionsDir, "missions-dir", opts.MissionsDir, "Factory Droid missions directory")
+	flags.StringArrayVar(&opts.Missions, "mission", opts.Missions, "repair only this mission directory id, mis_* id, or mission path; repeatable")
+	flags.StringVar(&opts.Setup.BaseURL, "base-url", opts.Setup.BaseURL, "cagent OpenAI-compatible base URL")
+	flags.StringVar(&opts.Setup.APIToken, "api-token", opts.Setup.APIToken, "Droid custom model API token; defaults to CAGENT_TOKEN or local-cagent-token")
+	flags.StringVar(&opts.Setup.CodexModel, "codex-model", opts.Setup.CodexModel, "Codex model to expose through cagent")
+	flags.StringVar(&opts.Setup.ReasoningEffort, "reasoning-effort", opts.Setup.ReasoningEffort, "Droid and Codex reasoning effort")
+	flags.IntVar(&opts.Setup.MaxContextLimit, "max-context-limit", opts.Setup.MaxContextLimit, "Droid custom model maxContextLimit")
+	flags.IntVar(&opts.Setup.SafeMaxOutputTokens, "safe-max-output-tokens", opts.Setup.SafeMaxOutputTokens, "safe Droid maxOutputTokens profile")
+	flags.IntVar(&opts.Setup.MaxOutputTokens, "max-output-tokens", opts.Setup.MaxOutputTokens, "aggressive Droid maxOutputTokens profile")
+	flags.BoolVar(&opts.Setup.SkipScrutiny, "skip-scrutiny", opts.Setup.SkipScrutiny, "set mission skipScrutiny")
+	flags.BoolVar(&opts.Setup.SkipUserTesting, "skip-user-testing", opts.Setup.SkipUserTesting, "set mission skipUserTesting")
+	flags.BoolVar(&opts.All, "all", opts.All, "also repair completed and cancelled missions")
+	flags.BoolVar(&opts.DryRun, "dry-run", opts.DryRun, "print missions that would be repaired without writing files")
+	flags.BoolVar(&opts.Backup, "backup", opts.Backup, "write timestamped backups before updating mission files")
 	return cmd
 }
 
@@ -319,11 +461,15 @@ func NewDroidExecCommand(version string) *cobra.Command {
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			droidArgs := droid.ExecArgs(opts, args)
+			env := map[string]string{}
+			if opts.SettingsPath != "" {
+				env[droid.RuntimeSettingsPathEnv] = opts.SettingsPath
+			}
 			if printOnly {
-				fmt.Fprintln(cmd.OutOrStdout(), shellCommand(droidBin, droidArgs))
+				fmt.Fprintln(cmd.OutOrStdout(), shellCommandWithEnv(env, droidBin, droidArgs))
 				return nil
 			}
-			return runExternal(cmd.Context(), droidBin, droidArgs)
+			return runExternal(cmd.Context(), droidBin, droidArgs, env)
 		},
 	}
 	cmd.SetVersionTemplate("cagent droid exec {{.Version}}\n")
@@ -350,20 +496,47 @@ func NewDroidLaunchCommand(version string) *cobra.Command {
 	settingsPath := ""
 	cwd := ""
 	printOnly := false
+	generateSettings := true
+	setupOpts := droid.NormalizeSetupOptions(droid.SetupOptions{
+		SkipScrutiny:    true,
+		SkipUserTesting: true,
+	})
 	cmd := &cobra.Command{
 		Use:           "launch [prompt]",
-		Short:         "Launch interactive Droid after cagent droid setup",
+		Short:         "Launch interactive Droid with cagent runtime settings",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			droidArgs := droid.LaunchArgs(settingsPath, cwd, args)
+			runtimeSettingsPath := settingsPath
+			generated := false
+			if runtimeSettingsPath == "" && generateSettings {
+				if printOnly {
+					runtimeSettingsPath = "<generated-cagent-runtime-settings.json>"
+				} else {
+					var err error
+					runtimeSettingsPath, err = droid.WriteRuntimeSettingsFile("", setupOpts)
+					if err != nil {
+						return err
+					}
+					generated = true
+					defer os.Remove(runtimeSettingsPath)
+				}
+			}
+			droidArgs := droid.LaunchArgs(runtimeSettingsPath, cwd, args)
+			env := map[string]string{}
+			if runtimeSettingsPath != "" {
+				env[droid.RuntimeSettingsPathEnv] = runtimeSettingsPath
+			}
 			if printOnly {
-				fmt.Fprintln(cmd.OutOrStdout(), shellCommand(droidBin, droidArgs))
+				fmt.Fprintln(cmd.OutOrStdout(), shellCommandWithEnv(env, droidBin, droidArgs))
 				return nil
 			}
-			return runExternal(cmd.Context(), droidBin, droidArgs)
+			if generated {
+				fmt.Fprintf(cmd.OutOrStdout(), "using generated Droid runtime settings %s\n", runtimeSettingsPath)
+			}
+			return runExternal(cmd.Context(), droidBin, droidArgs, env)
 		},
 	}
 	cmd.SetVersionTemplate("cagent droid launch {{.Version}}\n")
@@ -372,6 +545,17 @@ func NewDroidLaunchCommand(version string) *cobra.Command {
 	flags.StringVar(&settingsPath, "settings", settingsPath, "runtime settings file to pass to Droid")
 	flags.StringVar(&cwd, "cwd", cwd, "working directory for Droid")
 	flags.BoolVar(&printOnly, "print", printOnly, "print the droid command without running it")
+	flags.BoolVar(&generateSettings, "generate-settings", generateSettings, "generate and pass a per-process cagent Droid settings file when --settings is unset")
+	flags.StringVar(&setupOpts.BaseURL, "base-url", setupOpts.BaseURL, "cagent OpenAI-compatible base URL for generated settings")
+	flags.StringVar(&setupOpts.APIToken, "api-token", setupOpts.APIToken, "Droid custom model API token for generated settings; defaults to CAGENT_TOKEN or local-cagent-token")
+	flags.StringVar(&setupOpts.CodexModel, "codex-model", setupOpts.CodexModel, "Codex model for generated settings")
+	flags.StringVar(&setupOpts.ReasoningEffort, "reasoning-effort", setupOpts.ReasoningEffort, "Droid and Codex reasoning effort for generated settings")
+	flags.IntVar(&setupOpts.MaxContextLimit, "max-context-limit", setupOpts.MaxContextLimit, "Droid custom model maxContextLimit for generated settings")
+	flags.IntVar(&setupOpts.CompactionTokenLimit, "compaction-token-limit", setupOpts.CompactionTokenLimit, "Droid compaction limit for generated settings")
+	flags.IntVar(&setupOpts.SafeMaxOutputTokens, "safe-max-output-tokens", setupOpts.SafeMaxOutputTokens, "safe Droid maxOutputTokens profile for generated settings")
+	flags.IntVar(&setupOpts.MaxOutputTokens, "max-output-tokens", setupOpts.MaxOutputTokens, "aggressive Droid maxOutputTokens profile for generated settings")
+	flags.BoolVar(&setupOpts.SkipScrutiny, "skip-scrutiny", setupOpts.SkipScrutiny, "set mission skipScrutiny in generated settings")
+	flags.BoolVar(&setupOpts.SkipUserTesting, "skip-user-testing", setupOpts.SkipUserTesting, "set mission skipUserTesting in generated settings")
 	return cmd
 }
 
@@ -437,21 +621,105 @@ func RunServe(ctx context.Context, cfg config.Config, logger *log.Logger) error 
 	}
 }
 
-func runExternal(ctx context.Context, bin string, args []string) error {
+func runExternal(ctx context.Context, bin string, args []string, extraEnv map[string]string) error {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if len(extraEnv) > 0 {
+		cmd.Env = environmentWithOverrides(extraEnv)
+	}
 	return cmd.Run()
 }
 
+func environmentWithOverrides(extraEnv map[string]string) []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+len(extraEnv))
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if _, replace := extraEnv[key]; ok && replace {
+			continue
+		}
+		out = append(out, item)
+	}
+	for key, value := range extraEnv {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
 func shellCommand(bin string, args []string) string {
+	return shellCommandWithEnv(nil, bin, args)
+}
+
+func shellCommandWithEnv(extraEnv map[string]string, bin string, args []string) string {
 	parts := make([]string, 0, len(args)+1)
+	keys := make([]string, 0, len(extraEnv))
+	for key := range extraEnv {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := extraEnv[key]
+		parts = append(parts, key+"="+strconv.Quote(value))
+	}
 	parts = append(parts, strconv.Quote(bin))
 	for _, arg := range args {
 		parts = append(parts, strconv.Quote(arg))
 	}
 	return strings.Join(parts, " ")
+}
+
+func printDroidMissionsTable(out io.Writer, missions []droid.MissionInfo) error {
+	writer := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(writer, "DIR\tMISSION\tSTATE\tREPAIR\tUPDATED\tCWD"); err != nil {
+		return err
+	}
+	for _, mission := range missions {
+		repair := "ok"
+		if mission.NeedsRepair {
+			repair = "repair"
+		}
+		state := mission.State
+		if state == "" {
+			state = "unknown"
+		}
+		if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			mission.DirectoryID,
+			mission.ID,
+			state,
+			repair,
+			mission.UpdatedAt,
+			mission.WorkingDirectory,
+		); err != nil {
+			return err
+		}
+	}
+	return writer.Flush()
+}
+
+func runningDroidProcesses() []string {
+	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(out), "\n")
+	processes := make([]string, 0)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, "droid") {
+			continue
+		}
+		if strings.Contains(line, "cagent droid") ||
+			strings.Contains(line, "go run ./cmd/cagent") ||
+			strings.Contains(line, "rg ") ||
+			strings.Contains(line, "codex") ||
+			strings.Contains(line, "Codex") {
+			continue
+		}
+		processes = append(processes, line)
+	}
+	return processes
 }
 
 func parseTargets(value string) ([]int, error) {

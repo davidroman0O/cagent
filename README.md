@@ -95,13 +95,19 @@ Configure Factory Droid to use cagent for the main session and all mission roles
 ```sh
 cagent droid setup
 cagent droid doctor
+cagent droid missions --active
+cagent droid repair-missions
 ```
+
+If Droid is already running, fully quit and restart it after `setup`. Droid can keep custom model/BYOK settings cached inside an existing interactive process.
 
 From source:
 
 ```sh
 go run ./cmd/cagent droid setup
 go run ./cmd/cagent droid doctor
+go run ./cmd/cagent droid missions --active
+go run ./cmd/cagent droid repair-missions
 ```
 
 Then run cagent with the Codex 1M overrides:
@@ -120,6 +126,8 @@ Launch interactive Droid normally after setup:
 cagent droid launch --cwd /path/to/repo
 ```
 
+`launch` generates a per-process Droid runtime settings file, passes it with `droid --settings ...`, and exports `FACTORY_RUNTIME_SETTINGS_PATH` for the Droid process. That keeps spawned mission workers on the same cagent custom models, xhigh defaults, and 1M/900K limits even if Droid's global settings cache is stale. Use `--generate-settings=false` only when you intentionally want raw Droid global settings.
+
 For non-interactive mission runs, cagent can pass all Droid mission model overrides directly:
 
 ```sh
@@ -132,6 +140,26 @@ The default setup also sets Droid mission `skipScrutiny` and `skipUserTesting` t
 
 ```sh
 cagent droid setup --skip-scrutiny=false --skip-user-testing=false
+```
+
+If Droid shows `BYOK Error: 400 status code (no body)` while resuming an older mission, repair the mission-local snapshots too:
+
+```sh
+cagent droid missions --needs-repair
+cagent droid repair-missions
+```
+
+Paused missions keep their own `model-settings.json` and `runtime-custom-models.json`; those files can still reference old generated custom ids even after `~/.factory/settings.json` is fixed. To repair only one mission, pass the mission directory id or Droid `mis_...` id:
+
+```sh
+cagent droid repair-missions --mission 9b1168ad-7d06-45f6-b8f8-7e8f234d46b0
+cagent droid repair-missions --mission mis_6d89f6a6
+```
+
+If cagent logs do not show a matching `request started`, Droid is not hitting the running cagent server. Restart Droid, then confirm the configured default path with:
+
+```sh
+cagent droid exec --mission=false --cwd /path/to/repo "Reply exactly: ok"
 ```
 
 For Factory Droid BYOK, use the `openai` provider for mission mode; Droid sends mission actions as Responses tools with names like `ProposeMission`, `StartMissionRun`, `DismissHandoffItems`, and `EndFeatureRun`. See [docs/droid-settings/README.md](/Users/davidroman/Documents/code/github/cagent/docs/droid-settings/README.md).

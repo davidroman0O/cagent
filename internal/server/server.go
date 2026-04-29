@@ -122,12 +122,12 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	var req agent.AgentRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	session, err := s.manager.CreateSession(req)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, session)
@@ -139,7 +139,7 @@ func (s *Server) handleSessionPath(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		session, ok := s.manager.GetSession(parts[0])
 		if !ok {
-			writeError(w, http.StatusNotFound, aruntime.ErrUnknownSession)
+			s.writeError(w, r, http.StatusNotFound, aruntime.ErrUnknownSession)
 			return
 		}
 		writeJSON(w, http.StatusOK, session)
@@ -155,7 +155,7 @@ func (s *Server) handleSessionPath(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionTurn(w http.ResponseWriter, r *http.Request, sessionID string) {
 	var req agent.AgentRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	req.SessionID = sessionID
@@ -163,7 +163,7 @@ func (s *Server) handleSessionTurn(w http.ResponseWriter, r *http.Request, sessi
 	defer cancel()
 	events, err := s.manager.Run(ctx, req)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	if r.URL.Query().Get("stream") == "true" {
@@ -172,7 +172,7 @@ func (s *Server) handleSessionTurn(w http.ResponseWriter, r *http.Request, sessi
 	}
 	text, usage, err := collect(events)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -189,7 +189,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	var req compat.ChatCompletionRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	agentReq := compat.ChatToAgent(req, s.defaults)
@@ -197,7 +197,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	events, err := s.manager.Run(ctx, agentReq)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	id := newID("chatcmpl")
@@ -207,7 +207,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	text, usage, err := collect(events)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, compat.NewChatCompletion(id, agentReq.Model, text, usage))
@@ -220,7 +220,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	var req compat.ResponsesRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	toolNames := compat.ResponsesToolNames(req.Tools)
@@ -240,14 +240,14 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	events, err := s.manager.Run(ctx, agentReq)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	if req.Stream {
 		if len(toolNames) > 0 {
 			text, usage, err := collect(events)
 			if err != nil {
-				writeError(w, statusForRuntimeError(err), err)
+				s.writeError(w, r, statusForRuntimeError(err), err)
 				return
 			}
 			if call, ok := compat.ParseResponsesToolCall(text, toolNames); ok {
@@ -264,7 +264,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	text, usage, err := collect(events)
 	if err != nil {
-		writeError(w, statusForRuntimeError(err), err)
+		s.writeError(w, r, statusForRuntimeError(err), err)
 		return
 	}
 	if call, ok := compat.ParseResponsesToolCall(text, toolNames); ok {
@@ -290,7 +290,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get("x-api-key")
 		}
 		if token != s.token {
-			writeError(w, http.StatusUnauthorized, errors.New("missing or invalid API token"))
+			s.writeError(w, r, http.StatusUnauthorized, errors.New("missing or invalid API token"))
 			return
 		}
 		next(w, r)
@@ -300,6 +300,8 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := requestID(r)
+		r.Header.Set("X-Request-ID", requestID)
+		w.Header().Set("X-Request-ID", requestID)
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
 		s.logger.Printf("request started id=%s method=%s path=%s remote=%s", requestID, r.Method, r.URL.Path, remoteAddr(r))
@@ -319,6 +321,18 @@ func (s *Server) withRequestLogging(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(rec, r)
 	})
+}
+
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	s.logger.Printf(
+		"request error id=%s method=%s path=%s status=%d error=%q",
+		requestID(r),
+		r.Method,
+		r.URL.Path,
+		status,
+		err.Error(),
+	)
+	writeError(w, status, err)
 }
 
 func collect(events <-chan agent.AgentEvent) (string, *agent.Usage, error) {

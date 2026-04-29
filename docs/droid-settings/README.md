@@ -46,6 +46,8 @@ Run:
 ```sh
 cagent droid setup
 cagent droid doctor
+cagent droid missions --active
+cagent droid repair-missions
 ```
 
 From source:
@@ -53,9 +55,13 @@ From source:
 ```sh
 go run ./cmd/cagent droid setup
 go run ./cmd/cagent droid doctor
+go run ./cmd/cagent droid missions --active
+go run ./cmd/cagent droid repair-missions
 ```
 
 `setup` updates `~/.factory/settings.json`, writes a timestamped backup, and makes cagent the default for the main Droid session plus all three mission roles: orchestrator, worker, and validator.
+
+If Droid is already open, fully quit and restart it after `setup`. Existing Droid processes can cache custom model/BYOK settings and keep using the old endpoint/model data.
 
 By default, setup skips Droid's automatic milestone scrutiny and user-testing validators. The implementation worker still runs through Droid Mission mode and still calls `EndFeatureRun`; this default avoids the extra validation workers that currently make BYOK/cagent missions slow and brittle. To force the full Droid validation phase, run:
 
@@ -71,7 +77,51 @@ custom:cagent-gpt-5-5-xhigh-128k-max
 
 Use `cagent droid launch --cwd /path/to/repo` to start interactive Droid after setup.
 
+`launch` generates a temporary runtime settings file, passes it to Droid with `--settings`, and exports `FACTORY_RUNTIME_SETTINGS_PATH` for the Droid process. This is stronger than relying on `~/.factory/settings.json` alone because the interactive Droid command does not expose `--model` or `--reasoning-effort` flags, existing Droid processes can cache old BYOK settings, and mission workers are spawned as child `droid exec` processes. Use `cagent droid launch --print --cwd /path/to/repo` to see the command shape.
+
 Use `cagent droid exec --cwd /path/to/repo "mission prompt"` for non-interactive mission runs. That wrapper passes Droid's `--model`, `--worker-model`, and `--validator-model` flags directly.
+
+## BYOK 400 quick check
+
+If Droid shows:
+
+```text
+BYOK Error: 400 status code (no body)
+```
+
+check the cagent terminal. If there is no matching `request started` log line, the request did not reach cagent. Restart Droid and run:
+
+```sh
+cagent droid exec --mission=false --cwd /path/to/repo "Reply exactly: ok"
+```
+
+If that command succeeds, the settings and cagent endpoint are good; the failed Droid UI/session was using cached or different BYOK state.
+
+For mission resume failures, also repair the mission-local files:
+
+```sh
+cagent droid missions --needs-repair
+cagent droid repair-missions
+```
+
+Droid snapshots mission model settings under `~/.factory/missions/<mission>/model-settings.json` and runtime custom model definitions under `~/.factory/missions/<mission>/runtime-custom-models.json`. Older paused missions can keep stale generated ids such as `custom:cagent-GPT-5.5-XHigh-128K-Max-5` and `reasoningEffort: "none"` even after global setup is correct. `repair-missions` updates active non-terminal missions to:
+
+- `custom:cagent-gpt-5-5-xhigh-128k-max`
+- `workerReasoningEffort` / `validationWorkerReasoningEffort`: `xhigh`
+- `skipScrutiny`: `true`
+- `skipUserTesting`: `true`
+- the current stable cagent custom model list
+
+The command writes timestamped `.cagent-backup-*` files before modifying mission artifacts. Use `--dry-run` to inspect what would change.
+
+To repair only one mission, pass either the mission directory id, the full mission path, or Droid's `mis_...` id. The flag is repeatable:
+
+```sh
+cagent droid repair-missions --mission 9b1168ad-7d06-45f6-b8f8-7e8f234d46b0
+cagent droid repair-missions --mission mis_6d89f6a6 --mission mis_e28bc080
+```
+
+`cagent droid missions` lists the values to pass to `--mission`. Use `--active` for non-terminal missions, `--needs-repair` for only stale snapshots, or `--format json` for scripts.
 
 ## Recommended settings.json
 
